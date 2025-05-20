@@ -276,7 +276,6 @@
                 try {
                     const querySnapshot = await db.collection('booked_sessions')
                         .where('provider_id', '==', providerId)
-                        .where('status', 'in', ['scheduled', 'active'])
                         .orderBy('session_time', 'asc')
                         .get();
                     
