@@ -50,7 +50,8 @@
         
         .session-meta {
             display: flex;
-            justify-content: space-between;
+            flex-direction: column;
+            gap: 5px;
             font-size: 14px;
             color: #7f8c8d;
             margin-bottom: 15px;
@@ -139,27 +140,6 @@
             color: #7f8c8d;
             font-size: 18px;
         }
-        
-        .copy-link {
-            display: flex;
-            margin-top: 15px;
-        }
-        
-        .copy-link input {
-            flex-grow: 1;
-            padding: 8px;
-            border: 1px solid #ddd;
-            border-radius: 5px 0 0 5px;
-        }
-        
-        .copy-link button {
-            padding: 8px 15px;
-            background-color: #2ecc71;
-            color: white;
-            border: none;
-            border-radius: 0 5px 5px 0;
-            cursor: pointer;
-        }
     </style>
 </head>
 <body>
@@ -180,19 +160,12 @@
         
         <button id="endCallButton" class="btn btn-end">End Session</button>
         
-        <div class="copy-link">
-            <input type="text" id="sessionLink" readonly>
-            <button id="copyLinkBtn">Copy Link</button>
-        </div>
-        
         <div id="videoContainer">
             <video id="localVideo" autoplay muted></video>
         </div>
     </div>
 
-    <!-- Load LiveKit client from CDN -->
     <script src="https://cdn.jsdelivr.net/npm/livekit-client@latest/dist/livekit-client.umd.min.js"></script>
-    <!-- Load Firebase -->
     <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-firestore.js"></script>
     
@@ -220,19 +193,15 @@
             const videoContainer = document.getElementById('videoContainer');
             const statusElement = document.getElementById('status');
             const errorElement = document.getElementById('error');
-            const sessionLinkInput = document.getElementById('sessionLink');
-            const copyLinkBtn = document.getElementById('copyLinkBtn');
             
             // Configuration
             const TOKEN_SERVER_URL = 'https://livekittoken.onrender.com/get-token';
             const LIVEKIT_URL = 'wss://psy-cliniq-s70l8vu6.ojeddah1a.production.livekit.cloud';
-            const CLIENT_JOIN_URL = 'https://your-app.com/join-session'; // Change this to your client join URL
             
             // State variables
             let room;
             let localStream;
             let currentSessionId;
-            let currentSessionData;
             
             // Get provider_id from URL
             const urlParams = new URLSearchParams(window.location.search);
@@ -247,13 +216,10 @@
             setupEventListeners();
             loadSessions();
             
-            // Event Listeners
             function setupEventListeners() {
                 endCallButton.addEventListener('click', endVideoCall);
-                copyLinkBtn.addEventListener('click', copySessionLink);
             }
             
-            // Load provider's sessions
             async function loadSessions() {
                 try {
                     const sessions = await fetchSessions(providerId);
@@ -271,25 +237,27 @@
                 }
             }
             
-            // Fetch sessions from Firestore
             async function fetchSessions(providerId) {
                 try {
                     const querySnapshot = await db.collection('booked_sessions')
                         .where('provider_id', '==', providerId)
-                        //.orderBy('session_time', 'asc')
                         .get();
                     
-                    return querySnapshot.docs.map(doc => ({
-                        id: doc.id,
-                        ...doc.data()
-                    }));
+                    return querySnapshot.docs.map(doc => {
+                        const data = doc.data();
+                        return {
+                            id: doc.id,
+                            user_name: data.user_name || 'Client',
+                            booked_date: data.booked_date || 'Not specified',
+                            booked_time: data.booked_time || 'Not specified'
+                        };
+                    });
                 } catch (error) {
                     console.error('Error fetching sessions:', error);
                     throw error;
                 }
             }
             
-            // Render sessions list
             function renderSessions(sessions) {
                 sessionsContainer.innerHTML = '';
                 
@@ -302,19 +270,23 @@
                     
                     const clientName = document.createElement('div');
                     clientName.className = 'client-name';
-                    clientName.textContent = session.user_name || 'Client';
+                    clientName.textContent = session.user_name;
                     
                     const sessionMeta = document.createElement('div');
                     sessionMeta.className = 'session-meta';
                     
-                    const sessionDate = document.createElement('div');
-                    sessionDate.textContent = new Date(session.session_time?.toDate()).toLocaleDateString();
+                    const bookedDate = document.createElement('div');
+                    bookedDate.textContent = `Date: ${session.booked_date}`;
+                    
+                    const bookedTime = document.createElement('div');
+                    bookedTime.textContent = `Time: ${session.booked_time}`;
                     
                     const sessionTime = document.createElement('div');
                     sessionTime.className = 'session-time';
                     sessionTime.id = `clock-${session.id}`;
                     
-                    sessionMeta.appendChild(sessionDate);
+                    sessionMeta.appendChild(bookedDate);
+                    sessionMeta.appendChild(bookedTime);
                     sessionMeta.appendChild(sessionTime);
                     
                     clientInfo.appendChild(clientName);
@@ -322,7 +294,7 @@
                     
                     const startButton = document.createElement('button');
                     startButton.className = 'btn';
-                    startButton.textContent = session.status === 'active' ? 'Rejoin Session' : 'Start Session';
+                    startButton.textContent = 'Start Session';
                     startButton.addEventListener('click', () => startVideoCall(session));
                     
                     sessionCard.appendChild(clientInfo);
@@ -332,58 +304,44 @@
                 });
             }
             
-            // Update all clocks every second
             function updateClocks() {
                 const clocks = document.querySelectorAll('[id^="clock-"]');
                 clocks.forEach(updateClock);
                 setTimeout(updateClocks, 1000);
             }
             
-            // Update a single clock element
             function updateClock(clockElement) {
                 const now = new Date();
-                clockElement.textContent = now.toLocaleTimeString();
+                clockElement.textContent = `Current time: ${now.toLocaleTimeString()}`;
             }
             
-            // Start a video call session
             async function startVideoCall(session) {
                 try {
                     currentSessionId = session.id;
-                    currentSessionData = session;
                     
-                    // Switch to video call view
                     sessionsView.classList.add('hidden');
                     videoCallView.classList.remove('hidden');
                     resetUI();
                     updateStatus('Initializing session...');
                     
-                    // Generate session link
-                    sessionLinkInput.value = `${CLIENT_JOIN_URL}?session_id=${session.id}`;
-                    
-                    // 1. Get media permissions
-                    updateStatus('Requesting camera and microphone access...');
                     localStream = await getMediaAccess();
                     if (!localStream) return;
-                    
-                    // 2. Get token from server
+
                     updateStatus('Connecting to video server...');
                     const { token } = await getToken(session.id);
                     
-                    // 3. Save token to Firestore for client to use
                     await db.collection('booked_sessions').doc(session.id).update({
                         token: token,
                         status: 'active',
                         last_updated: firebase.firestore.FieldValue.serverTimestamp()
                     });
-                    
-                    // 4. Connect to LiveKit room
+
                     room = await connectToRoom(LIVEKIT_URL, token);
                     
-                    // 5. Setup UI
                     setupVideoElements();
                     setupRoomEventListeners();
                     
-                    updateStatus('Session started! Share the link above with your client.');
+                    updateStatus('Session started! Waiting for client to join...');
                     
                 } catch (error) {
                     console.error('Error starting session:', error);
@@ -392,11 +350,9 @@
                 }
             }
             
-            // End the current video call
             async function endVideoCall() {
                 cleanup();
                 
-                // Remove token from Firestore
                 if (currentSessionId) {
                     await db.collection('booked_sessions').doc(currentSessionId).update({
                         token: firebase.firestore.FieldValue.delete(),
@@ -405,15 +361,11 @@
                     });
                 }
                 
-                // Return to sessions view
                 videoCallView.classList.add('hidden');
                 sessionsView.classList.remove('hidden');
-                
-                // Refresh sessions list
                 loadSessions();
             }
             
-            // Get media access
             async function getMediaAccess() {
                 try {
                     const stream = await navigator.mediaDevices.getUserMedia({
@@ -431,7 +383,6 @@
                 }
             }
             
-            // Get token from your token server
             async function getToken(sessionId) {
                 try {
                     const response = await fetch(TOKEN_SERVER_URL, {
@@ -439,11 +390,7 @@
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             roomName: sessionId,
-                            participantName: `provider-${providerId}`,
-                            metadata: JSON.stringify({
-                                provider_id: providerId,
-                                session_id: sessionId
-                            })
+                            participantName: `provider-${providerId}`
                         }),
                     });
                     
@@ -458,7 +405,6 @@
                 }
             }
             
-            // Connect to LiveKit room
             async function connectToRoom(url, token) {
                 try {
                     const room = new LivekitClient.Room({
@@ -473,7 +419,6 @@
                         autoSubscribe: true,
                     });
                     
-                    // Publish local media tracks
                     if (localStream) {
                         const videoTrack = localStream.getVideoTracks()[0];
                         const audioTrack = localStream.getAudioTracks()[0];
@@ -499,12 +444,9 @@
                 }
             }
             
-            // Setup video elements
             function setupVideoElements() {
-                // Clear existing videos
                 videoContainer.innerHTML = '';
                 
-                // Add local video
                 const localVideo = document.createElement('video');
                 localVideo.id = 'localVideo';
                 localVideo.autoplay = true;
@@ -516,30 +458,25 @@
                 }
             }
             
-            // Setup room event listeners
             function setupRoomEventListeners() {
                 if (!room) return;
                 
-                // Participant connected
                 room.on('participantConnected', participant => {
                     updateStatus(`${participant.identity} joined the session`);
                     addParticipantVideo(participant);
                 });
                 
-                // Participant disconnected
                 room.on('participantDisconnected', participant => {
                     updateStatus(`${participant.identity} left the session`);
                     removeParticipantVideo(participant.sid);
                 });
                 
-                // Room disconnected
                 room.on('disconnected', () => {
                     updateStatus('Session ended');
                     endVideoCall();
                 });
             }
             
-            // Add participant video
             function addParticipantVideo(participant) {
                 const video = document.createElement('video');
                 video.autoplay = true;
@@ -553,45 +490,29 @@
                 });
             }
             
-            // Remove participant video
             function removeParticipantVideo(participantSid) {
                 document.querySelectorAll(`[data-participant="${participantSid}"]`).forEach(el => el.remove());
             }
             
-            // Copy session link to clipboard
-            function copySessionLink() {
-                sessionLinkInput.select();
-                document.execCommand('copy');
-                updateStatus('Session link copied to clipboard!');
-                setTimeout(() => {
-                    updateStatus('Session in progress. Share the link with your client.');
-                }, 2000);
-            }
-            
-            // Update status message
             function updateStatus(message) {
                 statusElement.textContent = message;
                 hideError();
             }
             
-            // Show error message
             function showError(message) {
                 errorElement.textContent = message;
                 errorElement.classList.remove('hidden');
             }
             
-            // Hide error message
             function hideError() {
                 errorElement.classList.add('hidden');
             }
             
-            // Reset UI elements
             function resetUI() {
                 videoContainer.innerHTML = '';
                 hideError();
             }
             
-            // Cleanup resources
             function cleanup() {
                 if (localStream) {
                     localStream.getTracks().forEach(track => track.stop());
