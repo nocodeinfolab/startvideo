@@ -276,7 +276,7 @@
                 try {
                     const querySnapshot = await db.collection('booked_sessions')
                         .where('provider_id', '==', providerId)
-                        .orderBy('session_time', 'asc')
+                        //.orderBy('session_time', 'asc')
                         .get();
                     
                     return querySnapshot.docs.map(doc => ({
