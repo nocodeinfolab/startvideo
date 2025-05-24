@@ -202,6 +202,8 @@
             let room;
             let localStream;
             let currentSessionId;
+            let reconnectAttempts = 0;
+            const MAX_RECONNECT_ATTEMPTS = 3;
             
             // Get provider_id from URL
             const urlParams = new URLSearchParams(window.location.search);
@@ -241,6 +243,7 @@
                 try {
                     const querySnapshot = await db.collection('booked_sessions')
                         .where('provider_id', '==', providerId)
+                        .where('status', 'in', ['scheduled', 'active'])
                         .get();
                     
                     return querySnapshot.docs.map(doc => {
@@ -249,7 +252,8 @@
                             id: doc.id,
                             user_name: data.user_name || 'Client',
                             booked_date: data.booked_date || 'Not specified',
-                            booked_time: data.booked_time || 'Not specified'
+                            booked_time: data.booked_time || 'Not specified',
+                            status: data.status || 'scheduled'
                         };
                     });
                 } catch (error) {
@@ -281,12 +285,17 @@
                     const bookedTime = document.createElement('div');
                     bookedTime.textContent = `Time: ${session.booked_time}`;
                     
+                    const sessionStatus = document.createElement('div');
+                    sessionStatus.textContent = `Status: ${session.status}`;
+                    sessionStatus.style.color = session.status === 'active' ? '#27ae60' : '#e67e22';
+                    
                     const sessionTime = document.createElement('div');
                     sessionTime.className = 'session-time';
                     sessionTime.id = `clock-${session.id}`;
                     
                     sessionMeta.appendChild(bookedDate);
                     sessionMeta.appendChild(bookedTime);
+                    sessionMeta.appendChild(sessionStatus);
                     sessionMeta.appendChild(sessionTime);
                     
                     clientInfo.appendChild(clientName);
@@ -294,7 +303,7 @@
                     
                     const startButton = document.createElement('button');
                     startButton.className = 'btn';
-                    startButton.textContent = 'Start Session';
+                    startButton.textContent = session.status === 'active' ? 'Rejoin Session' : 'Start Session';
                     startButton.addEventListener('click', () => startVideoCall(session));
                     
                     sessionCard.appendChild(clientInfo);
@@ -318,30 +327,37 @@
             async function startVideoCall(session) {
                 try {
                     currentSessionId = session.id;
+                    reconnectAttempts = 0;
                     
                     sessionsView.classList.add('hidden');
                     videoCallView.classList.remove('hidden');
                     resetUI();
                     updateStatus('Initializing session...');
                     
+                    // 1. Get media access
                     localStream = await getMediaAccess();
                     if (!localStream) return;
 
-                    updateStatus('Connecting to video server...');
-                    const { token } = await getToken(session.id);
+                    // 2. Get token (specify this is a provider)
+                    updateStatus('Getting session token...');
+                    const { token } = await getToken(session.id, true);
                     
+                    // 3. Update Firestore
                     await db.collection('booked_sessions').doc(session.id).update({
                         token: token,
                         status: 'active',
                         last_updated: firebase.firestore.FieldValue.serverTimestamp()
                     });
 
+                    // 4. Connect to room
+                    updateStatus('Connecting to video server...');
                     room = await connectToRoom(LIVEKIT_URL, token);
                     
+                    // 5. Setup UI
                     setupVideoElements();
                     setupRoomEventListeners();
                     
-                    updateStatus('Session started! Waiting for client to join...');
+                    updateStatus('Session started! Waiting for client...');
                     
                 } catch (error) {
                     console.error('Error starting session:', error);
@@ -383,14 +399,15 @@
                 }
             }
             
-            async function getToken(sessionId) {
+            async function getToken(roomName, isProvider) {
                 try {
                     const response = await fetch(TOKEN_SERVER_URL, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
-                            roomName: sessionId,
-                            participantName: `provider-${providerId}`
+                            roomName: roomName,
+                            participantName: providerId,
+                            isProvider: isProvider
                         }),
                     });
                     
@@ -412,11 +429,16 @@
                         dynacast: true,
                         videoCaptureDefaults: {
                             resolution: LivekitClient.VideoPresets.h720.resolution
+                        },
+                        publishDefaults: {
+                            simulcast: true,
+                            videoCodec: 'vp8'
                         }
                     });
                     
                     await room.connect(url, token, {
                         autoSubscribe: true,
+                        maxRetries: 3
                     });
                     
                     if (localStream) {
@@ -425,15 +447,14 @@
                         
                         if (videoTrack) {
                             await room.localParticipant.publishTrack(videoTrack, {
-                                name: 'webcam',
-                                simulcast: true,
-                                encoding: LivekitClient.VideoPresets.h720.encoding
+                                name: 'provider-webcam',
+                                simulcast: true
                             });
                         }
                         
                         if (audioTrack) {
                             await room.localParticipant.publishTrack(audioTrack, {
-                                name: 'microphone'
+                                name: 'provider-microphone'
                             });
                         }
                     }
@@ -462,8 +483,10 @@
                 if (!room) return;
                 
                 room.on('participantConnected', participant => {
-                    updateStatus(`${participant.identity} joined the session`);
-                    addParticipantVideo(participant);
+                    if (participant.identity.startsWith('client-')) {
+                        updateStatus(`Client joined: ${participant.identity}`);
+                        addParticipantVideo(participant);
+                    }
                 });
                 
                 room.on('participantDisconnected', participant => {
@@ -471,9 +494,29 @@
                     removeParticipantVideo(participant.sid);
                 });
                 
-                room.on('disconnected', () => {
-                    updateStatus('Session ended');
-                    endVideoCall();
+                room.on('trackPublished', (publication, participant) => {
+                    console.log('Track published by', participant.identity, publication.trackSid);
+                });
+                
+                room.on('trackUnpublished', (publication, participant) => {
+                    console.log('Track unpublished by', participant.identity, publication.trackSid);
+                });
+                
+                room.on('disconnected', async () => {
+                    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                        reconnectAttempts++;
+                        updateStatus(`Disconnected. Reconnecting (attempt ${reconnectAttempts})...`);
+                        try {
+                            await room.connect(LIVEKIT_URL, room.token);
+                            updateStatus('Reconnected successfully!');
+                        } catch (err) {
+                            console.error('Reconnect failed:', err);
+                            endVideoCall();
+                        }
+                    } else {
+                        updateStatus('Session ended');
+                        endVideoCall();
+                    }
                 });
             }
             
